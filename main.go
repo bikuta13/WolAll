@@ -1,33 +1,33 @@
 package main
 
 import (
+	"encoding/gob"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 )
 
-// Computer хранит данные по компьютеру: имя, MAC-адрес и IP (с портом)
 type Computer struct {
 	Name string
 	MAC  string
-	IP   string // пример: "192.168.4.99:9"
+	IP   string
 }
 
-// buildMagicPacket формирует magic packet по стандарту WOL
 func buildMagicPacket(mac string) ([]byte, error) {
 	mac = strings.ToLower(strings.ReplaceAll(mac, ":", ""))
 	macBytes, err := hex.DecodeString(mac)
 	if err != nil || len(macBytes) != 6 {
 		return nil, fmt.Errorf("неправильный MAC-адрес: %s", mac)
 	}
-
-	// Пакет начинается с 6 байт 0xFF, затем 16 повторений MAC-адреса
 	packet := make([]byte, 6+16*6)
 	for i := 0; i < 6; i++ {
 		packet[i] = 0xFF
@@ -38,62 +38,98 @@ func buildMagicPacket(mac string) ([]byte, error) {
 	return packet, nil
 }
 
-// sendMagicPacket отправляет magic packet по указанным параметрам
 func sendMagicPacket(mac, targetIP string) error {
 	packet, err := buildMagicPacket(mac)
 	if err != nil {
 		return err
 	}
-
 	conn, err := net.Dial("udp", targetIP)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-
 	_, err = conn.Write(packet)
 	return err
 }
 
+func getStorageFile(app fyne.App) (fyne.URI, error) {
+	root := app.Storage().RootURI()
+	return storage.Child(root, "computers.gob")
+}
+
+func saveComputers(app fyne.App, comps []Computer) {
+	fileURI, err := getStorageFile(app)
+	if err != nil {
+		fmt.Println("Ошибка пути:", err)
+		return
+	}
+	writer, err := storage.Writer(fileURI)
+	if err != nil {
+		fmt.Println("Ошибка открытия файла:", err)
+		return
+	}
+	defer writer.Close()
+
+	enc := gob.NewEncoder(writer)
+	err = enc.Encode(comps)
+	if err != nil {
+		fmt.Println("Ошибка кодирования:", err)
+	}
+}
+
+func loadComputers(app fyne.App) []Computer {
+	fileURI, err := getStorageFile(app)
+	if err != nil {
+		fmt.Println("Ошибка пути:", err)
+		return nil
+	}
+	reader, err := storage.Reader(fileURI)
+	if err != nil {
+		return nil
+	}
+	defer reader.Close()
+
+	var comps []Computer
+	dec := gob.NewDecoder(reader)
+	err = dec.Decode(&comps)
+	if err != nil && err != io.EOF {
+		fmt.Println("Ошибка декодирования:", err)
+	}
+	return comps
+}
+
 func main() {
-	// Инициализация приложения Fyne
 	a := app.New()
 	w := a.NewWindow("Wake-on-LAN")
 
-	// Список компьютеров (можешь заменить данные на свои)
-	computers := []Computer{
-		{"BIG", "18:c0:4d:8a:38:ce", "192.168.4.55:9"},
-		{"Debian", "1c:69:7a:65:2d:98", "192.168.4.99:9"},
-		{"NAS", "94:de:80:db:c7:02", "192.168.4.40:9"},
-	}
+	computers := loadComputers(a)
 
-	// Извлекаем имена для выпадающего списка
-	names := []string{}
-	for _, comp := range computers {
-		names = append(names, comp.Name)
-	}
-
-	// Создание выпадающего списка
-	selectComp := widget.NewSelect(names, func(selected string) {
-		// можно реализовать динамическое обновление информации при выборе
-	})
-	selectComp.PlaceHolder = "Выберите компьютер"
-
-	// Метка статуса для отображения результата отправки
+	var selectComp *widget.Select
 	statusLabel := widget.NewLabel("Статус: не отправлено")
 
-	// Кнопка для пробуждения выбранного компьютера
+	updateSelect := func() {
+		names := []string{}
+		for _, c := range computers {
+			names = append(names, c.Name)
+		}
+		selectComp.Options = names
+		selectComp.Refresh()
+	}
+
+	selectComp = widget.NewSelect([]string{}, func(selected string) {})
+	selectComp.PlaceHolder = "Выберите компьютер"
+	updateSelect()
+
 	wakeButton := widget.NewButton("Пробудить", func() {
 		selectedName := selectComp.Selected
 		if selectedName == "" {
 			statusLabel.SetText("Статус: выберите компьютер")
 			return
 		}
-
 		var comp *Computer
-		for _, c := range computers {
+		for i, c := range computers {
 			if c.Name == selectedName {
-				comp = &c
+				comp = &computers[i]
 				break
 			}
 		}
@@ -101,7 +137,6 @@ func main() {
 			statusLabel.SetText("Статус: компьютер не найден")
 			return
 		}
-
 		err := sendMagicPacket(comp.MAC, comp.IP)
 		if err != nil {
 			statusLabel.SetText(fmt.Sprintf("Ошибка: %v", err))
@@ -110,14 +145,59 @@ func main() {
 		}
 	})
 
-	// Создаем интерфейс с вертикальной компоновкой
-	content := container.NewVBox(
-		widget.NewLabel("Выберите компьютер для пробуждения:"),
+	addButton := widget.NewButton("+", func() {
+		nameEntry := widget.NewEntry()
+		macEntry := widget.NewEntry()
+		ipEntry := widget.NewEntry()
+
+		items := []*widget.FormItem{
+			widget.NewFormItem("Имя", nameEntry),
+			widget.NewFormItem("MAC", macEntry),
+			widget.NewFormItem("IP:port", ipEntry),
+		}
+
+		dialog.ShowForm("Добавить компьютер", "Сохранить", "Отмена", items, func(ok bool) {
+			if ok {
+				computers = append(computers, Computer{
+					Name: nameEntry.Text,
+					MAC:  macEntry.Text,
+					IP:   ipEntry.Text,
+				})
+				saveComputers(a, computers)
+				updateSelect()
+			}
+		}, w)
+	})
+
+	removeButton := widget.NewButton(" - ", func() {
+		selectedName := selectComp.Selected
+		if selectedName == "" {
+			statusLabel.SetText("Статус: выберите компьютер для удаления")
+			return
+		}
+		for i, c := range computers {
+			if c.Name == selectedName {
+				computers = append(computers[:i], computers[i+1:]...)
+				saveComputers(a, computers)
+				updateSelect()
+				selectComp.ClearSelected()
+				statusLabel.SetText("Удалено")
+				return
+			}
+		}
+	})
+
+	w.SetContent(container.NewVBox(
+		container.NewHBox(
+			widget.NewLabel("Выберите компьютер для пробуждения:"),
+			addButton,
+			removeButton,
+		),
 		selectComp,
 		wakeButton,
 		statusLabel,
-	)
-	w.SetContent(content)
-	w.Resize(fyne.NewSize(300, 200))
+	))
+
+	w.Resize(fyne.NewSize(350, 250))
 	w.ShowAndRun()
 }
