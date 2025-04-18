@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 )
@@ -19,7 +20,7 @@ import (
 type Computer struct {
 	Name string
 	MAC  string
-	IP   string
+	IP   string // формат: "192.168.1.10:9"
 }
 
 func buildMagicPacket(mac string) ([]byte, error) {
@@ -147,13 +148,44 @@ func main() {
 
 	addButton := widget.NewButton("+", func() {
 		nameEntry := widget.NewEntry()
+
 		macEntry := widget.NewEntry()
+		macEntry.OnChanged = func(s string) {
+			clean := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(s, ":", ""), "-", ""))
+			if len(clean) > 12 {
+				clean = clean[:12]
+			}
+			var builder strings.Builder
+			for i, r := range clean {
+				builder.WriteRune(r)
+				if i%2 == 1 && i < 11 {
+					builder.WriteRune(':')
+				}
+			}
+			formatted := builder.String()
+			if formatted != s {
+				macEntry.SetText(formatted)
+			}
+		}
+
 		ipEntry := widget.NewEntry()
+		ipEntry.OnChanged = func(s string) {
+			var filtered strings.Builder
+			for _, r := range s {
+				if (r >= '0' && r <= '9') || r == '.' {
+					filtered.WriteRune(r)
+				}
+			}
+			clean := filtered.String()
+			if clean != s {
+				ipEntry.SetText(clean)
+			}
+		}
 
 		items := []*widget.FormItem{
 			widget.NewFormItem("Имя", nameEntry),
 			widget.NewFormItem("MAC", macEntry),
-			widget.NewFormItem("IP:port", ipEntry),
+			widget.NewFormItem("IP", ipEntry),
 		}
 
 		dialog.ShowForm("Добавить компьютер", "Сохранить", "Отмена", items, func(ok bool) {
@@ -161,7 +193,7 @@ func main() {
 				computers = append(computers, Computer{
 					Name: nameEntry.Text,
 					MAC:  macEntry.Text,
-					IP:   ipEntry.Text,
+					IP:   ipEntry.Text + ":9", // ← порт добавляется автоматически
 				})
 				saveComputers(a, computers)
 				updateSelect()
@@ -169,7 +201,7 @@ func main() {
 		}, w)
 	})
 
-	removeButton := widget.NewButton(" - ", func() {
+	removeButton := widget.NewButton("-", func() {
 		selectedName := selectComp.Selected
 		if selectedName == "" {
 			statusLabel.SetText("Статус: выберите компьютер для удаления")
@@ -190,6 +222,7 @@ func main() {
 	w.SetContent(container.NewVBox(
 		container.NewHBox(
 			widget.NewLabel("Выберите компьютер для пробуждения:"),
+			layout.NewSpacer(),
 			addButton,
 			removeButton,
 		),
@@ -197,7 +230,6 @@ func main() {
 		wakeButton,
 		statusLabel,
 	))
-
-	w.Resize(fyne.NewSize(350, 250))
+	w.Resize(fyne.NewSize(400, 250))
 	w.ShowAndRun()
 }
